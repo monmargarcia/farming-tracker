@@ -105,7 +105,7 @@ export async function sendWeeklyReminder() {
         </thead>
         <tbody>${rows}</tbody>
       </table>
-      <p style="color:#555;margin-top:24px">Open your <a href="http://localhost:5173">farming dashboard</a> to log activity after you're done.</p>
+      <p style="color:#555;margin-top:24px">Open your <a href="${process.env.APP_URL ?? 'http://localhost:5173'}">farming dashboard</a> to log activity after you're done.</p>
     </div>
   `
 
