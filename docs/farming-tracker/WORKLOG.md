@@ -574,3 +574,56 @@ Security flags (final pass over everything, not just this step):
 Next action: present the full Step 9 summary to the user, including the
 repo-hygiene issue (git root is the user's work repo, not a farming-tracker repo)
 — this needs a decision before any commit is proposed, not just before any push.
+
+## 2026-08-19 — Post-Step-9: standalone repo init + initial commit
+Status: DONE
+Changed:
+- User chose (via AskUserQuestion): a new standalone git repo inside
+  `farming-tracker/` itself, independent of the Projects-level work repo
+  (`github.com/IFSRNG/fastify-internal-api`) — the repo-hygiene issue flagged
+  since the very first review of this project.
+- `git init` inside `farming-tracker/`, default branch renamed to `main`
+- Removed `./{backend` / `./{backend/src/{db,services,routes,cron},frontend` —
+  empty stray directories from a broken brace-expansion command in the original
+  (pre-session) scaffold; confirmed empty before deleting
+- `farming-tracker/.gitignore` (new) — node_modules, dist, .env/.env.local,
+  `.vercel/`, logs, coverage, IDE files, .DS_Store. Deliberately does NOT ignore
+  `package-lock.json` (diverges from the old parent-repo `.gitignore`'s
+  convention) — committing lockfiles is the better default here given the real
+  dependency-mismatch bugs this session already found and fixed
+  (Fastify/cors, drizzle-kit/orm)
+- Initial commit `c4355eb` — 49 files (`backend/`, `frontend/`,
+  `docs/farming-tracker/`, `CLAUDE.md`, `.gitignore`, `vercel.json`, plus the
+  Vercel-installed Supabase agent-skill files under `.agents/`/`.claude/`)
+Tested:
+- `git status` before staging, confirming `.env`/`.env.local`/`.vercel`/
+  `node_modules`/`dist` were NOT present in the untracked-files list (i.e.
+  correctly ignored) before ever running `git add`
+- `git diff --cached | grep` across the full staged diff for secret-shaped
+  strings (postgres connection strings, API keys, passwords) before committing
+  — every hit was either placeholder text (`.env.example`, `your_alchemy_key`)
+  or prose in this session's own WORKLOG referencing secret-handling, never an
+  actual credential value
+- `git status` after commit
+Result:
+- Pre-stage untracked list: `.agents/`, `.claude/`, `.gitignore`, `CLAUDE.md`,
+  `backend/`, `docs/`, `frontend/`, `skills-lock.json`, `vercel.json` — exactly
+  the intended set, secrets correctly absent
+- Secrets grep: no real credential values found in the staged diff
+- `git log --oneline -1`: `c4355eb Initial commit: farming tracker backend +
+  frontend`
+- `git status` post-commit: `nothing to commit, working tree clean`
+Fixed: the stray empty brace-expansion directories (cosmetic cleanup, pre-dated
+this session, unrelated to any deliverable).
+Security flags:
+- API08/secrets-in-git: this was the core concern of the whole repo-hygiene
+  question — resolved by giving the project its own repo AND independently
+  verifying no secret values were staged, not just trusting `.gitignore` alone.
+- Not pushed anywhere — no remote configured on this new repo, and a push would
+  need its own explicit ask regardless per rule 5.
+Next action: none required from the plan — all 9 steps are done. Future sessions
+should run the session-start ritual (read FEATURE-BRIEF.md, PLAN.md's first
+non-done step — there isn't one — ASSUMPTIONS.md's OPEN items, and this entry)
+before making changes. Remaining OPEN items in ASSUMPTIONS.md (no auth, unescaped
+email HTML, npm audit dev-tooling findings, Vercel/node-cron deployment
+architecture mismatch) are known, accepted gaps, not TODOs assigned to any step.
