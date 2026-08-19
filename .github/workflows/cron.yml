@@ -1,0 +1,28 @@
+name: Scheduled jobs
+
+on:
+  schedule:
+    # Every Monday at 9:00 AM SGT (UTC+8 = 01:00 UTC) — weekly reminder
+    - cron: '0 1 * * 1'
+    # Every 6 hours — Paradex XP sync
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  weekly-reminder:
+    if: github.event.schedule == '0 1 * * 1' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger weekly reminder
+        run: |
+          curl -sf -X POST "${{ secrets.APP_URL }}/api/cron/weekly-reminder" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+  paradex-sync:
+    if: github.event.schedule == '0 */6 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Paradex sync
+        run: |
+          curl -sf -X POST "${{ secrets.APP_URL }}/api/cron/paradex-sync" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"

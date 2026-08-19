@@ -1,36 +1,36 @@
-import cron from 'node-cron'
 import { sendWeeklyReminder } from '../services/notificationService.js'
 import { syncParadexPoints } from '../services/paradexService.js'
 
-// Exported (not just used inline in startCronJobs) so tests can call these
-// directly and prove a failure inside either job is caught and logged rather
-// than left as an unhandled rejection in an unattended background process.
+// Exported so tests can call these directly, and so the HTTP-triggered routes
+// in routes/cron.ts can invoke them without duplicating error handling.
+// Scheduling itself lives outside this app entirely — see
+// .github/workflows/cron.yml. There is no in-process scheduler here: Vercel
+// deploys this app as stateless serverless functions, which can't host a
+// long-running node-cron timer.
+//
+// Return a success boolean (rather than letting the error propagate) so the
+// route layer can surface a real HTTP failure — GitHub Actions marks a cron
+// run failed/notifies on a non-2xx response, which is the whole point of
+// running this via CI instead of silently swallowing the error.
 
-export async function runWeeklyReminder() {
+export async function runWeeklyReminder(): Promise<boolean> {
   console.log('[Cron] Running weekly reminder...')
   try {
     await sendWeeklyReminder()
+    return true
   } catch (err) {
     console.error('[Cron] Weekly reminder failed:', err instanceof Error ? err.message : err)
+    return false
   }
 }
 
-export async function runParadexSync() {
+export async function runParadexSync(): Promise<boolean> {
   console.log('[Cron] Syncing Paradex points...')
   try {
     await syncParadexPoints()
+    return true
   } catch (err) {
     console.error('[Cron] Paradex points sync failed:', err instanceof Error ? err.message : err)
+    return false
   }
-}
-
-export function startCronJobs() {
-  // Every Monday at 9:00 AM SGT (UTC+8 = 01:00 UTC)
-  // Send reminder email if any wallet has been inactive for 5+ days
-  cron.schedule('0 1 * * 1', runWeeklyReminder, { timezone: 'Asia/Singapore' })
-
-  // Every 6 hours — sync Paradex XP points
-  cron.schedule('0 */6 * * *', runParadexSync)
-
-  console.log('[Cron] Jobs registered: weekly reminder + Paradex points sync')
 }

@@ -50,16 +50,19 @@ executes. Never delete resolved items — mark `[RESOLVED]` in place.
 - [RESOLVED] — full `FARMING_WALLETS` address — step: Step 3 — resolution: user
   filled in the real address directly in `backend/.env`
   (`0xf56cB38c7422e684d79d14B56B95CDdA9DEfb342`, chain ethereum) — 2026-08-19
-- [OPEN] — `RESEND_API_KEY/FROM/TO`, `ALCHEMY_API_KEY/RPC_URL` — still placeholders
-  in `backend/.env`. Not needed until a live run since tests mock those per rule 6
-  (Steps 5/7).
-- [OPEN] — `vercel link` auto-detected frontend/backend as separate deploy targets
-  and generated a `vercel.json` with serverless routing for both (not requested,
-  just CLI default monorepo behavior — harmless, nothing deployed). Flagging a real
-  architecture mismatch for whenever deployment is discussed: `node-cron` requires
-  a long-running process, which Vercel serverless functions don't provide — the
-  weekly-reminder and Paradex-polling cron jobs as currently written would not run
-  if this backend were deployed to Vercel as-is.
+- [OPEN] — `RESEND_API_KEY/FROM/TO`, `ALCHEMY_API_KEY/RPC_URL` — still
+  placeholders in `backend/.env` AND unset on Vercel (deliberately not pushed —
+  see deployment WORKLOG entry). The app is now live and reachable, but the
+  weekly reminder email and gas auto-detect won't actually do anything real
+  until these are set as real Vercel env vars (they already fail gracefully
+  without crashing, per Steps 5/7's design — this is a "not yet configured" gap,
+  not a bug).
+- [RESOLVED] — `node-cron`/Vercel serverless mismatch — step: post-Step-9
+  deployment — resolution: replaced `node-cron` entirely with GitHub Actions
+  cron (`.github/workflows/cron.yml`) hitting new secret-gated
+  `POST /api/cron/*` routes; deployed for real to
+  https://farming-tracker.vercel.app and verified end-to-end, including the
+  authenticated cron path. Full detail in WORKLOG.md's deployment entry.
 - [RESOLVED] — `drizzle-orm` ^0.30.0 (resolved 0.30.10) carried a HIGH-severity
   SQL-identifier-escaping / injection advisory (GHSA-gpj5-g38j-94v9), fixed in
   0.45.2 — step: Step 1 (`npm audit`) — resolution: initially deferred by user
@@ -82,12 +85,15 @@ executes. Never delete resolved items — mark `[RESOLVED]` in place.
   someone else to inject a malicious label through anyway), but worth escaping if
   either field ever becomes attacker-influenced. Not in scope for Step 7 as
   approved — flagging rather than fixing silently.
-- [OPEN] — `npm audit` on backend still reports 9 findings (7 moderate, 1 high, 1
-  critical) as of Step 9 — checked in detail, not fixed:
-  - All but one trace back to `esbuild`, pulled in transitively by `vitest` (→
-    `vite` → `esbuild`) and `drizzle-kit` (→ `@esbuild-kit/*` → `esbuild`) — both
-    **devDependencies only**, never shipped to the production build (`node
-    dist/index.js` doesn't touch vite/esbuild/drizzle-kit at all).
+- [OPEN] — `npm audit` on backend reports 7 findings (5 moderate, 1 high, 1
+  critical) as of the deployment work (down from 9 at Step 9 — removing
+  `node-cron` while switching to GitHub Actions cron also removed its `uuid`
+  dependency, the one finding that was in a production dependency) — checked in
+  detail, not fixed:
+  - All remaining findings trace back to `esbuild`, pulled in transitively by
+    `vitest` (→ `vite` → `esbuild`) and `drizzle-kit` (→ `@esbuild-kit/*` →
+    `esbuild`) — both **devDependencies only**, never shipped to the production
+    build or to the deployed `api/index.ts` function.
   - The "critical" one is specifically Vitest's `--ui` dev server allowing
     arbitrary file read/execute when that UI server is listening — this project
     only ever runs `vitest run` / `vitest` (no `--ui` flag anywhere), so the
@@ -95,11 +101,6 @@ executes. Never delete resolved items — mark `[RESOLVED]` in place.
     version is present.
   - The "high" one is a Vite dev-server path-traversal/NTLMv2/fs-deny-bypass
     cluster — again dev-server-only, not applicable to the deployed app.
-  - The one that IS in a production dependency: `node-cron` → `uuid` (moderate,
-    missing bounds check when a caller supplies a `buf` argument) — `node-cron`
-    only uses `uuid` internally for auto-generated job IDs with no external input
-    reaching that argument, so real exploitability against this app is
-    effectively nil, but it is genuinely shipped code, unlike the others.
   - Fixing any of this means `npm audit fix --force`, which would bump
     `vitest` 1.6→4.x (three major versions) — a real breaking-change risk to the
     whole test suite, not something to do silently in a "final review" step.

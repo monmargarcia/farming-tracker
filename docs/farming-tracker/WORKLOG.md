@@ -627,3 +627,154 @@ non-done step — there isn't one — ASSUMPTIONS.md's OPEN items, and this entr
 before making changes. Remaining OPEN items in ASSUMPTIONS.md (no auth, unescaped
 email HTML, npm audit dev-tooling findings, Vercel/node-cron deployment
 architecture mismatch) are known, accepted gaps, not TODOs assigned to any step.
+
+## 2026-08-20 — Post-Step-9: Vercel deployment via GitHub Actions cron
+Status: DONE
+Context: user asked to deploy to Vercel by linking the GitHub repo. Flagged
+before starting that `node-cron` can't run on Vercel serverless functions
+(no persistent process); user proposed GitHub Actions cron hitting HTTP
+endpoints instead — adopted that design.
+Changed:
+- `backend/src/routes/cron.ts` (new) — `POST /api/cron/weekly-reminder` and
+  `POST /api/cron/paradex-sync`, gated by `Authorization: Bearer $CRON_SECRET`
+  (401 without/wrong secret)
+- `backend/src/cron/weeklyReminder.ts` — dropped `node-cron` and
+  `startCronJobs()` entirely; `runWeeklyReminder`/`runParadexSync` now return a
+  success boolean instead of void, so the route layer can surface real HTTP
+  failures (see Fixed #2)
+- `backend/src/index.ts` — no longer calls `startCronJobs()`
+- `backend/src/app.ts` — registers `cronRoutes` under `/api`
+- `backend/src/services/notificationService.ts` — two fixes, see Fixed #1 and #2
+- `backend/package.json` — removed `node-cron` + `@types/node-cron`
+- `backend/src/routes/cron.test.ts` (new) — 6 tests (401 paths, success paths,
+  failure→500 paths)
+- `backend/src/cron/weeklyReminder.test.ts` — updated for the new boolean
+  return, added 2 success-path tests (4 tests total, was 2)
+- `package.json` (new, repo root) — npm workspaces (`backend`, `frontend`),
+  `"type": "module"` (see Fixed #4), root `typescript`/`@types/node` devDeps
+- `tsconfig.json` (new, repo root) — covers `api/`
+- `api/index.ts` (new) — Vercel serverless function wrapping `buildApp()`,
+  caches the built app across warm invocations
+- `vercel.json` — replaced the auto-generated `services` multi-service config
+  with `buildCommand`/`outputDirectory`/`installCommand` + an explicit
+  `/api/(.*)` → `/api` rewrite (see Fixed #3)
+- `frontend/src/api/client.ts` — `baseURL` now resolves to a relative `/api` in
+  production (same-origin via the Vercel rewrite) instead of a hardcoded
+  `localhost:3001` that would have been unreachable when deployed
+- `frontend/package.json` — added `@rollup/rollup-linux-x64-gnu` as an
+  `optionalDependency` (see Fixed #5)
+- `backend/package-lock.json` + `frontend/package-lock.json` removed, replaced
+  by one root-level `package-lock.json` (workspace-wide)
+- `.github/workflows/cron.yml` (new) — two schedules (Monday 1am UTC reminder,
+  every-6-hours Paradex sync) plus `workflow_dispatch`, each `curl -sf`ing the
+  matching `/api/cron/*` route with the bearer secret
+- `CLAUDE.md`, `README.md` — updated to describe the actual deployed
+  architecture (was previously silent on deployment / described the
+  now-removed node-cron scheduler)
+- Vercel project (`monmargarcia-5863s-projects/farming-tracker`): framework
+  preset reset from the stale auto-detected `services` to `other`
+  (`vercel project update --framework other`); `DATABASE_URL`,
+  `FARMING_WALLETS`, `CRON_SECRET` added as real env vars across
+  production/preview/development (`RESEND_*`/`ALCHEMY_*` deliberately left
+  unset — see ASSUMPTIONS.md, OPEN)
+- GitHub repo secrets: `CRON_SECRET` (same value as Vercel), `APP_URL`
+  (`https://farming-tracker.vercel.app`)
+Tested:
+- `npx tsc --noEmit` in `backend/`, `frontend/`, and the new repo root, after
+  every change
+- `npx vitest run` in `backend/`, multiple times through the sequence of fixes
+  below, ending clean
+- `vercel dev` locally against the real linked project — iterated here first,
+  specifically to avoid burning real deploys on routing/config mistakes
+- `vercel deploy --prod` — twice (first attempt failed at build, second at
+  runtime — see Fixed #4/#5); verified the final live deployment directly with
+  `curl` against `https://farming-tracker.vercel.app`: frontend HTML (200),
+  `GET /api/tasks` (real Supabase data), `PATCH /api/tasks/999999/complete`
+  (multi-segment path, correctly reaches Fastify's own 404), `POST
+  /api/cron/*` both without a secret (401) and with the real secret (200,
+  `{"ok":true}`) — the real secret was read from `backend/.env` and piped
+  directly into `curl`/`vercel env add`, never printed
+- `vercel logs` (JSON mode) to get full runtime stack traces for both
+  production failures, rather than guessing from the truncated table view
+Result: live and verified working end-to-end at
+https://farming-tracker.vercel.app — frontend serves, `/api/*` reaches the real
+Fastify app and real Supabase DB, multi-segment routing works, cron auth works
+both ways (rejects without secret, executes with it).
+Fixed (five distinct real bugs, four of them only catchable by an actual
+deploy attempt — exactly why this was done as a real deploy-and-iterate
+process rather than reasoned out and shipped blind):
+1. `notificationService.ts` constructed the Resend client
+   (`new Resend(process.env.RESEND_API_KEY)`) at module scope. The Resend SDK
+   throws immediately if given no key at all (not just an invalid one) —
+   since this module loads eagerly as part of the whole route tree, and
+   `RESEND_API_KEY` was deliberately left unset on Vercel, this crashed the
+   *entire* app on every single request, not just reminder-related ones.
+   First caught via `vercel dev` locally (`FUNCTION_INVOCATION_FAILED` /
+   "Missing API key"). Fixed by falling back to an obviously-fake placeholder
+   string so construction always succeeds; an actually-missing/invalid key now
+   only fails at send time, same graceful-failure contract as Steps 5/7 already
+   established elsewhere.
+2. Also in `notificationService.ts`: `sendWeeklyReminder()` awaited
+   `resend.emails.send()` and unconditionally logged success afterward — never
+   checking the SDK's returned `{ data, error }` shape. The Resend SDK doesn't
+   throw on API-level failures (bad/expired key, etc.), it resolves with
+   `error` populated instead. Caught by manually exercising the live cron
+   endpoint with the real (placeholder) key during `vercel dev` testing and
+   seeing a false "sent" log line. Fixed by throwing when `error` is present,
+   which the existing try/catch in `runWeeklyReminder` already catches
+   correctly — and while touching this, changed `runWeeklyReminder`/
+   `runParadexSync` to return a success boolean so the route can respond with a
+   real 500 on failure, making GitHub Actions correctly flag/notify on a truly
+   broken reminder instead of always reporting success.
+3. The initial `api/[...path].ts` catch-all-filename convention silently
+   failed to route any multi-segment path (`/api/cron/weekly-reminder`,
+   `/api/tasks/:id/complete`) to the function at all — Vercel's own router
+   returned its own 404 before the function was ever invoked, while
+   single-segment paths (`/api/tasks`) worked fine, which made this
+   non-obvious until tested directly against several different path shapes.
+   Root cause not fully diagnosed (the bracket catch-all convention may not
+   behave as a true arbitrary-depth catch-all under the "Other" framework
+   preset used here); switched to the more established pattern instead —
+   `api/index.ts` (plain filename) plus an explicit `vercel.json` rewrite
+   (`/api/(.*)` → `/api`), which preserves the real request path for Fastify's
+   own internal router. Verified directly against both single- and
+   multi-segment paths after the fix.
+4. First production deploy attempt crashed immediately with `SyntaxError:
+   Cannot use import statement outside a module` — the new repo-root
+   `package.json` had no `"type": "module"` field, so Node defaulted the
+   compiled `api/index.js` to CommonJS, which can't parse `import` syntax.
+   This didn't surface under `vercel dev` (its local dev transform pipeline is
+   less strict about this than the real production runtime) — only a real
+   `vercel deploy --prod` caught it. Fixed by adding `"type": "module"` to the
+   root `package.json`. Read the full stack trace via `vercel logs --json`
+   rather than guessing from the truncated default table output.
+5. First production *build* (before fix #4 was even reached) failed on
+   `Cannot find module @rollup/rollup-linux-x64-gnu` — a well-known npm
+   optional-dependencies bug (npm/cli#4828) where a lockfile generated on
+   macOS doesn't correctly declare the Linux-specific Rollup binary Vercel's
+   Linux build image needs, even on a reasonably current local npm (11.11.0).
+   Fixed by explicitly adding `@rollup/rollup-linux-x64-gnu` as an
+   `optionalDependency` in `frontend/package.json`, then regenerating the
+   lockfile from a clean `node_modules`/`package-lock.json` deletion — the
+   standard documented workaround for this exact error.
+Security flags:
+- API08 (secrets never printed): every credential handled this step
+  (`CRON_SECRET`, `DATABASE_URL`, `FARMING_WALLETS`) was piped directly from
+  `backend/.env` into `vercel env add` / `gh secret set` / `curl` without ever
+  being echoed to a terminal command whose output I read, consistent with the
+  pattern established since Step 2.
+- New attack surface introduced and mitigated: the `/api/cron/*` routes are
+  reachable from the public internet now that the app is deployed. Verified
+  directly (not just asserted) that an unauthenticated request gets 401 and
+  never reaches `sendWeeklyReminder`/`syncParadexPoints`.
+- API01 (still no auth on data routes): unchanged accepted gap from Step 9,
+  but now materially more relevant — the API is genuinely public, not
+  localhost-only, as of this deployment. Explicitly re-flagged in README and
+  ASSUMPTIONS.md rather than left as a stale "only matters if deployed" note.
+- Confirmed no real secret value ever appeared in any tool output, log file, or
+  chat-visible command result during this entire deployment process.
+Next action: none required. If/when live email/gas-auto-detect functionality is
+wanted, add real `RESEND_*`/`ALCHEMY_*` values to the Vercel project's env vars
+(ASSUMPTIONS.md, OPEN). Vercel's GitHub integration (auto-deploy on push) has
+not yet been explicitly connected in the dashboard — deploys so far were via
+`vercel deploy --prod` from the CLI.

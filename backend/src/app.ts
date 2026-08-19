@@ -3,6 +3,7 @@ import cors from '@fastify/cors'
 import sensible from '@fastify/sensible'
 import { activitiesRoutes } from './routes/activities.js'
 import { tasksRoutes } from './routes/tasks.js'
+import { cronRoutes } from './routes/cron.js'
 
 export async function buildApp() {
   const app = Fastify({ logger: false })
@@ -16,6 +17,7 @@ export async function buildApp() {
 
   await app.register(activitiesRoutes, { prefix: '/api' })
   await app.register(tasksRoutes, { prefix: '/api' })
+  await app.register(cronRoutes, { prefix: '/api' })
 
   app.get('/health', async () => ({ status: 'ok', ts: new Date().toISOString() }))
 

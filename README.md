@@ -8,6 +8,8 @@ This is **not** a trading bot. All transactions are executed manually by you, in
 your own wallet app. The backend only reads public chain/API data and manages a
 checklist + activity log — it never signs or broadcasts anything.
 
+Live at **https://farming-tracker.vercel.app**.
+
 ## Features
 
 - **Weekly checklist** — auto-generates a task list per active protocol every
@@ -31,28 +33,38 @@ checklist + activity log — it never signs or broadcasts anything.
 - **Frontend** — React 18, Vite, TanStack Query, Recharts
 - **Database** — Supabase (Postgres)
 - **Email** — Resend
-- **Scheduling** — node-cron (in-process — see [Deployment](#deployment) below)
+- **Scheduling** — GitHub Actions cron, hitting protected `POST /api/cron/*`
+  routes (see [Deployment](#deployment) below) — no in-process scheduler
+- **Deployment** — Vercel, one project serving both the static frontend and the
+  backend as a serverless function
 - **External reads** — Alchemy (EVM tx/gas lookups), Paradex's public REST API,
   DeFiLlama (ETH price)
 
 ## Project structure
 
 ```
+api/index.ts       Vercel serverless function — wraps the Fastify app for deploy
 backend/
   src/
     db/            Drizzle schema, DB client, seed script
-    routes/        Fastify routes — activities, tasks
+    routes/        Fastify routes — activities, tasks, cron
     services/      Alchemy, Paradex, DeFiLlama, Resend integrations
-    cron/          Weekly reminder + Paradex polling schedules
-    app.ts         Fastify app factory (routes + plugins, no listen)
-    index.ts       Real entrypoint — builds the app, starts cron, listens
+    cron/          Weekly reminder + Paradex sync job logic (see Deployment)
+    app.ts         Fastify app factory (routes + plugins, no listen) — reused
+                    by both the local dev entrypoint and the Vercel function
+    index.ts       Local dev entrypoint — builds the app and listens
   drizzle/         Generated SQL migrations
 frontend/
   src/
     pages/         Dashboard
     api/           Backend API client
-docs/farming-tracker/   Build log — plan, worklog, and open assumptions
+.github/workflows/cron.yml   Scheduled triggers for the cron routes
+docs/farming-tracker/        Build log — plan, worklog, and open assumptions
 ```
+
+Root is an npm workspace (`package.json` → `workspaces: [backend, frontend]`) so
+`api/index.ts` can import `backend/src/app.js` directly, and so Vercel's build
+can install both packages' dependencies in one pass.
 
 ## Getting started
 
@@ -66,8 +78,7 @@ docs/farming-tracker/   Build log — plan, worklog, and open assumptions
 ### 1. Install dependencies
 
 ```bash
-cd backend && npm install
-cd ../frontend && npm install
+npm install   # from the repo root — this is an npm workspace
 ```
 
 ### 2. Configure environment
@@ -79,10 +90,11 @@ cp backend/.env.example backend/.env
 | Variable | Required | Notes |
 |---|---|---|
 | `DATABASE_URL` | Yes | Postgres connection string. On Supabase, use the direct/session-mode connection (port 5432) — this is a long-running server, not serverless functions. |
-| `PORT` | No | Defaults to `3001`. |
+| `PORT` | No | Defaults to `3001`. Only used by the local dev entrypoint; irrelevant on Vercel. |
 | `FARMING_WALLETS` | Yes, for seeding | Comma-separated wallet address(es) to seed. |
 | `RESEND_API_KEY` / `RESEND_FROM` / `RESEND_TO` | Only for live reminder emails | Safe to leave as placeholders otherwise. |
 | `ALCHEMY_API_KEY` / `ALCHEMY_RPC_URL` | Only for gas auto-detect | Auto-detect fails gracefully (saves with no gas value) if unset or invalid. |
+| `CRON_SECRET` | Yes, to trigger `/api/cron/*` | Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`. Must match what's set in Vercel and in the GitHub Actions repo secrets. |
 
 ### 3. Run migrations and seed data
 
@@ -114,6 +126,8 @@ All routes are prefixed with `/api`.
 | `GET` | `/activities/summary` | Gas spent + action counts, grouped by protocol. |
 | `GET` | `/tasks` | This week's checklist — auto-generates it on first request of the week. |
 | `PATCH` | `/tasks/:id/complete` | Mark a task done. |
+| `POST` | `/cron/weekly-reminder` | Triggers the reminder email job. Requires `Authorization: Bearer $CRON_SECRET`; returns 401 without it, 500 if the job itself fails. Called by GitHub Actions, not meant for browser/dashboard use. |
+| `POST` | `/cron/paradex-sync` | Triggers a Paradex XP poll. Same auth requirement as above. |
 
 `GET /health` (unprefixed) returns a basic liveness check.
 
@@ -123,7 +137,7 @@ All routes are prefixed with `/api`.
 cd backend && npm test
 ```
 
-19 Vitest tests cover every route and background service, run against a real
+27 Vitest tests cover every route and background service, run against a real
 database (no mocking of Drizzle/Postgres — only third-party APIs like
 Alchemy/DeFiLlama/Paradex/Resend are mocked). Test files run sequentially
 (`vitest.config.ts`) since they share one live database with no per-test
@@ -136,16 +150,34 @@ transaction isolation.
   phrases, or any signing credential, and no code in this repo writes one.
 - **All chain reads are read-only.** Nothing in the backend can sign or submit a
   transaction; every activity is a manual, after-the-fact log entry.
-- **No authentication exists on any route.** This is intentional for a
-  single-user, localhost-only tool — do not expose this API on a public network
-  without adding an auth layer first.
+- **No authentication exists on the data routes** (`/activities`, `/tasks`).
+  This is intentional for a single-user tool, but it *is* now deployed on a
+  public URL — that tradeoff is a live decision, not just a local-dev one.
+- **The `/cron/*` routes are gated by a shared secret**, checked against an
+  `Authorization: Bearer` header, so an arbitrary internet request can't
+  trigger a real email send or burn third-party API calls.
 
 ## Deployment
 
-`node-cron`'s scheduling relies on a long-running process. It will not run
-correctly on serverless platforms (e.g. Vercel Functions) without being
-re-architected around a platform-native cron trigger — keep that in mind before
-deploying the backend anywhere serverless.
+Deployed on Vercel as a single project: the frontend builds as a static site,
+and `api/index.ts` wraps the Fastify app (via `backend/src/app.ts`'s
+`buildApp()`) as one serverless function handling all `/api/*` requests —
+`vercel.json` rewrites `/api/(.*)` to it so Fastify sees the real request path
+and does its own internal routing.
+
+There is deliberately **no in-process scheduler**. `node-cron` needs a
+long-running process, which serverless functions don't provide. Instead,
+`.github/workflows/cron.yml` runs on GitHub's schedule (Monday 1am UTC for the
+reminder, every 6 hours for the Paradex sync) and calls the protected
+`POST /api/cron/*` routes over HTTP — a normal short-lived request, which is
+exactly what serverless functions are built for. A failed job returns a
+non-2xx response, which fails the GitHub Actions run (and can notify you),
+rather than failing silently.
+
+To redeploy manually: `vercel deploy --prod`. Required env vars
+(`DATABASE_URL`, `FARMING_WALLETS`, `CRON_SECRET`, and optionally
+`RESEND_*`/`ALCHEMY_*`) are set per-environment in the Vercel project, not read
+from `backend/.env` at deploy time.
 
 ## More detail
 

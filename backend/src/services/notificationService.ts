@@ -3,7 +3,13 @@ import { db } from '../db/index.js'
 import { activities, protocols, wallets, tasks } from '../db/schema.js'
 import { eq, gte, and } from 'drizzle-orm'
 
-export const resend = new Resend(process.env.RESEND_API_KEY)
+// The Resend SDK throws at construction time if given no key at all (not just
+// an invalid one) — that would crash the entire app on boot wherever
+// RESEND_API_KEY isn't set yet, since this module loads eagerly as part of the
+// whole route tree. Fall back to an obviously-fake placeholder so construction
+// always succeeds; an actually-missing/invalid key still fails gracefully at
+// send time, caught by runWeeklyReminder's try/catch same as before.
+export const resend = new Resend(process.env.RESEND_API_KEY || 're_not_configured')
 
 interface InactiveWallet {
   walletLabel: string
@@ -103,12 +109,19 @@ export async function sendWeeklyReminder() {
     </div>
   `
 
-  await resend.emails.send({
+  // The Resend SDK doesn't throw on API-level failures (bad/expired key, etc.)
+  // — it resolves with { data: null, error: {...} }. Not checking `error` here
+  // meant a broken key would log "sent" forever while never sending anything.
+  const { error } = await resend.emails.send({
     from: process.env.RESEND_FROM!,
     to: process.env.RESEND_TO!,
     subject: `🌾 Farming reminder — ${inactive.length} protocol(s) need attention`,
     html,
   })
+
+  if (error) {
+    throw new Error(`Resend API error: ${error.message}`)
+  }
 
   console.log(`[Notifications] Weekly reminder sent for ${inactive.length} inactive wallet/protocol pairs`)
 }
